@@ -16,6 +16,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.db import list_sessions, load_session_flights, price_history, historical_avg_price
+from app.services.adjacent_baseline import fetch_adjacent_baseline
 from app.schemas import FlightOption, ScoredFlight
 from app.services.recommender import recommend
 from app.services.scorer import ScoringWeights
@@ -157,6 +158,8 @@ def _fetch_and_score(origin: str, dest: str, depart: str) -> list[ScoredFlight]:
     config = SearchConfig(origin=origin, destination=dest, depart_date=depart)
     flights = fetch_flights(config)
     hist_avg = historical_avg_price(origin, dest, depart)
+    if hist_avg is None:
+        hist_avg = fetch_adjacent_baseline(origin, dest, depart)
     scored = recommend(flights, top_n=len(flights), hist_avg_price=hist_avg)
     try:
         save_session(config, scored)

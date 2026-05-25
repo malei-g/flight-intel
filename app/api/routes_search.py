@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
 from app.db import save_session, historical_avg_price
+from app.services.adjacent_baseline import fetch_adjacent_baseline
 from app.schemas import SearchConfig, ScoredFlight
 from app.services.flight_fetcher import fetch_flights
 from app.services.recommender import recommend
@@ -56,6 +57,8 @@ def search_flights(
         transfer_risk=w_transfer_risk, time_comfort=w_time_comfort,
     )
     hist_avg = historical_avg_price(config.origin, config.destination, config.depart_date)
+    if hist_avg is None:
+        hist_avg = fetch_adjacent_baseline(config.origin, config.destination, config.depart_date)
     scored = recommend(flights, top_n=len(flights), weights=weights, hist_avg_price=hist_avg)
 
     try:
