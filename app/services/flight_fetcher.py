@@ -1,52 +1,37 @@
 """
-flight_fetcher — 统一抓取接口，支持 provider 切换：
-  demo    : 读取 data/raw/demo_flights.json
-  google  : fast-flights 真实查询
+flight_fetcher — 统一抓取接口（仅 Google Flights 真实数据）
+抓取完成后自动写入 SQLite。
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-from pathlib import Path
 from typing import Optional
 
 from app.schemas import FlightOption, SearchConfig
 
 logger = logging.getLogger(__name__)
 
-_DEMO_PATH = Path(__file__).parent.parent.parent / "data" / "raw" / "demo_flights.json"
-
-
-def _load_demo() -> list[FlightOption]:
-    raw = json.loads(_DEMO_PATH.read_text())
-    return [FlightOption(**f) for f in raw]
-
 
 def fetch_flights(
     config: SearchConfig,
-    provider: Optional[str] = None,
     max_stops: Optional[int] = None,
 ) -> list[FlightOption]:
     """
-    根据 provider 拉取航班列表。
-    provider 优先级: 参数 > 环境变量 FLIGHT_PROVIDER > 'demo'
+    查询 Google Flights，返回去重后的 FlightOption 列表。
+    同时将本次结果持久化到 SQLite。
+    失败时抛出异常，由调用方处理。
     """
-    p = (provider or os.getenv("FLIGHT_PROVIDER", "demo")).lower()
-
-    if p == "google":
-        from app.providers.fast_flights_provider import fetch_google_flights
-        flights = fetch_google_flights(
-            origin=config.origin,
-            destination=config.destination,
-            depart_date=config.depart_date,
-            passengers=config.passengers,
-            max_stops=max_stops,
+    from app.providers.fast_flights_provider import fetch_google_flights
+    flights = fetch_google_flights(
+        origin=config.origin,
+        destination=config.destination,
+        depart_date=config.depart_date,
+        passengers=config.passengers,
+        max_stops=max_stops,
+    )
+    if not flights:
+        raise RuntimeError(
+            f"Google Flights returned 0 results for "
+            f"{config.origin}→{config.destination} on {config.depart_date}"
         )
-        if not flights:
-            logger.warning("google provider returned 0 flights, falling back to demo")
-            return _load_demo()
-        return flights
-
-    # default: demo
-    return _load_demo()
+    return flights
