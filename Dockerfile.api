@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install uv
+COPY pyproject.toml .
+RUN uv pip install --system fastapi "uvicorn[standard]" pydantic python-dotenv fast-flights
+
+COPY app/ ./app/
+COPY data/ ./data/
+
+EXPOSE 18765
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18765"]

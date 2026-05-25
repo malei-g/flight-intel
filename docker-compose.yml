@@ -1,0 +1,32 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "18765:18765"
+    environment:
+      - FLIGHT_PROVIDER=${FLIGHT_PROVIDER:-demo}
+      - API_PORT=18765
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18765/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "18766:18766"
+    environment:
+      - FLIGHT_PROVIDER=${FLIGHT_PROVIDER:-demo}
+      - API_BASE_URL=http://api:18765
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data

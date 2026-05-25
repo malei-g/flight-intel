@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install uv
+COPY pyproject.toml .
+RUN uv pip install --system streamlit pandas plotly pydantic fast-flights python-dotenv
+
+COPY app/ ./app/
+COPY dashboard/ ./dashboard/
+COPY data/ ./data/
+
+EXPOSE 18766
+CMD ["streamlit", "run", "dashboard/streamlit_app.py", \
+     "--server.port=18766", "--server.address=0.0.0.0", "--server.headless=true"]
