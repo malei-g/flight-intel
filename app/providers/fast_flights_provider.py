@@ -15,6 +15,36 @@ from app.schemas import FlightOption, FlightSegment
 
 logger = logging.getLogger(__name__)
 
+# 航司全称 → IATA 二字码（仅覆盖 PVG→DTW 常见承运人）
+_AIRLINE_IATA: dict[str, str] = {
+    "Air Canada":        "AC",
+    "Air China":         "CA",
+    "Air France":        "AF",
+    "ANA":               "NH",
+    "American":          "AA",
+    "Cathay Pacific":    "CX",
+    "China Airlines":    "CI",
+    "China Eastern":     "MU",
+    "Condor":            "DE",
+    "Delta":             "DL",
+    "JetBlue":           "B6",
+    "Korean Air":        "KE",
+    "Lufthansa":         "LH",
+    "Turkish Airlines":  "TK",
+    "United":            "UA",
+    "WestJet":           "WS",
+}
+
+
+def _airline_code(name: str) -> str:
+    """取航司名第一段（主承运人）的 IATA 二字码，未知航司返回首字母缩写。"""
+    primary = name.split(",")[0].strip()
+    if primary in _AIRLINE_IATA:
+        return _AIRLINE_IATA[primary]
+    # fallback：取每个单词首字母，最多 2 位
+    initials = "".join(w[0].upper() for w in primary.split() if w)
+    return initials[:2] or "XX"
+
 # "14 hr 30 min" / "2 hr" / "45 min"
 _DUR_RE = re.compile(r"(?:(\d+)\s*hr)?\s*(?:(\d+)\s*min)?")
 # "$1,234" / "1234"
@@ -60,7 +90,13 @@ def _parse_time(time_str: str, base_year: int) -> Optional[datetime]:
         return None
 
 
-def _ff_to_option(ff: FFlight, idx: int, depart_date_str: str) -> Optional[FlightOption]:
+def _ff_to_option(
+    ff: FFlight,
+    idx: int,
+    depart_date_str: str,
+    origin: str,
+    destination: str,
+) -> Optional[FlightOption]:
     """把一条 fast_flights.Flight 转成 FlightOption。"""
     price = _parse_price(ff.price)
     if price <= 0:
@@ -89,21 +125,27 @@ def _ff_to_option(ff: FFlight, idx: int, depart_date_str: str) -> Optional[Fligh
         # 到达比出发还早 → 跨年边缘，再加一年保护
         if arr_dt < dep_dt:
             arr_dt = arr_dt.replace(year=arr_dt.year + 1)
+        # fast-flights 偶尔返回错误的到达时刻（如 PM/AM 混淆）
+        # 若解析值与 duration 偏差 >30 min，以 duration 为准覆盖
+        if abs((arr_dt - dep_dt).total_seconds() / 60 - dur_min) > 30:
+            arr_dt = dep_dt + timedelta(minutes=dur_min)
     else:
         dep_dt = dep_dt or datetime.strptime(depart_date_str, "%Y-%m-%d").replace(hour=8)
         arr_dt = dep_dt + timedelta(minutes=dur_min)
 
     is_red_eye = dep_dt.hour >= 22 or dep_dt.hour <= 4
 
-    # 航司名：多航司用 " / " 分隔
+    # 航司名：多航司用 " / " 分隔；生成主承运人 IATA 代码
     airline = ff.name.replace(", ", " / ")
+    iata = _airline_code(ff.name)
+    flight_no = f"{iata}-{idx + 1:03d}"
 
     # 构造单段 Segment（fast-flights 不拆分段信息）
     seg = FlightSegment(
         airline=airline,
-        flight_no=f"FF{idx:04d}",
-        depart_airport="PVG",
-        arrive_airport="DTW",
+        flight_no=flight_no,
+        depart_airport=origin.upper(),
+        arrive_airport=destination.upper(),
         depart_time=dep_dt,
         arrive_time=arr_dt,
         duration_min=dur_min,
@@ -111,7 +153,7 @@ def _ff_to_option(ff: FFlight, idx: int, depart_date_str: str) -> Optional[Fligh
     )
 
     return FlightOption(
-        id=f"ff_{idx:04d}",
+        id=flight_no,
         price_usd=price,
         total_duration_min=dur_min,
         stops=ff.stops,
@@ -155,15 +197,16 @@ def fetch_google_flights(
 
     options: list[FlightOption] = []
     for idx, ff in enumerate(result.flights):
-        opt = _ff_to_option(ff, idx, depart_date)
+        opt = _ff_to_option(ff, idx, depart_date, origin, destination)
         if opt:
             options.append(opt)
 
-    # 去重：相同价格+时长+stops 只保留一条（fast-flights 有大量重复）
-    seen: set[tuple[float, int, int]] = set()
+    # 去重：相同价格+时长+stops+出发时刻 只保留一条
+    seen: set[tuple[float, int, int, int]] = set()
     deduped: list[FlightOption] = []
     for opt in options:
-        key = (opt.price_usd, opt.total_duration_min, opt.stops)
+        dep_hour = opt.segments[0].depart_time.hour if opt.segments else -1
+        key = (opt.price_usd, opt.total_duration_min, opt.stops, dep_hour)
         if key not in seen:
             seen.add(key)
             deduped.append(opt)

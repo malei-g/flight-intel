@@ -11,3 +11,4 @@ data/processed/*.csv
 .pytest_cache/
 dist/
 *.egg-info/
+data/flights.db

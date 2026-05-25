@@ -1,6 +1,5 @@
 """
-flight_fetcher — 统一抓取接口（仅 Google Flights 真实数据）
-抓取完成后自动写入 SQLite。
+flight_fetcher — 统一抓取接口（Google Flights via fast-flights）
 """
 from __future__ import annotations
 
@@ -18,8 +17,7 @@ def fetch_flights(
 ) -> list[FlightOption]:
     """
     查询 Google Flights，返回去重后的 FlightOption 列表。
-    同时将本次结果持久化到 SQLite。
-    失败时抛出异常，由调用方处理。
+    失败时抛出 RuntimeError，由调用方处理。
     """
     from app.providers.fast_flights_provider import fetch_google_flights
     flights = fetch_google_flights(

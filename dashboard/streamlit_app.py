@@ -15,7 +15,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.db import list_sessions, load_session_flights, price_history
+from app.db import list_sessions, load_session_flights, price_history, historical_avg_price
 from app.schemas import FlightOption, ScoredFlight
 from app.services.recommender import recommend
 from app.services.scorer import ScoringWeights
@@ -93,9 +93,13 @@ _CHART_LAYOUT = dict(
 
 # ── 页头 ──────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style="padding:24px 0 8px 0;">
+<div style="padding:24px 0 4px 0;">
   <span style="font-size:28px;font-weight:700;color:#f1f5f9;">✈ Flight Intel</span>
   <span style="font-size:14px;color:#64748b;margin-left:12px;">智能机票评分看板 · Google Flights 实时数据</span>
+</div>
+<div style="font-size:12px;color:#475569;padding-bottom:12px;">
+  航班号（如 <code style="background:#1e293b;padding:1px 5px;border-radius:4px;color:#38bdf8;">AC-001</code>）
+  为系统按航司 IATA 代码自动生成的<strong>虚拟标识</strong>，非真实航班号，仅供排序与追踪使用。
 </div>
 """, unsafe_allow_html=True)
 
@@ -152,7 +156,8 @@ def _fetch_and_score(origin: str, dest: str, depart: str) -> list[ScoredFlight]:
     from app.db import save_session
     config = SearchConfig(origin=origin, destination=dest, depart_date=depart)
     flights = fetch_flights(config)
-    scored = recommend(flights, top_n=len(flights))
+    hist_avg = historical_avg_price(origin, dest, depart)
+    scored = recommend(flights, top_n=len(flights), hist_avg_price=hist_avg)
     try:
         save_session(config, scored)
     except Exception:
@@ -191,7 +196,8 @@ if view_mode == "历史记录":
         except Exception:
             pass
     if flights_rebuild:
-        all_scored = recommend(flights_rebuild, top_n=len(flights_rebuild), weights=weights)
+        hist_avg = historical_avg_price(_iata_o, _iata_d, depart_date)
+        all_scored = recommend(flights_rebuild, top_n=len(flights_rebuild), weights=weights, hist_avg_price=hist_avg)
     else:
         st.error("无法解析历史数据")
         st.stop()
@@ -286,12 +292,16 @@ for sf in top_scored:
             </div>""", unsafe_allow_html=True)
         with mid:
             airline = f.segments[0].airline if f.segments else "—"
+            flight_no = f.segments[0].flight_no if f.segments else f.id
             st.markdown(f"""
             <div class="{card_cls(sf.rank)}" style="height:100%;">
               <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
                 <span style="font-size:18px;font-weight:700;color:#f1f5f9;">#{sf.rank}</span>
                 <span style="font-size:15px;font-weight:600;color:#e2e8f0;">{airline}</span>
-                <span style="font-size:13px;color:#64748b;">{f.id}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:13px;
+                             color:#38bdf8;background:#0f2942;padding:2px 8px;
+                             border-radius:6px;letter-spacing:0.05em;"
+                      title="虚拟航班号（系统生成，非真实航班号）">{flight_no} <sup style="font-size:9px;color:#64748b;">虚拟</sup></span>
               </div>
               <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:10px;">
                 <span class="mono" style="color:#22d3ee;font-size:22px;font-weight:600;">${f.price_usd:,.0f}</span>
@@ -318,6 +328,7 @@ for sf in all_scored:
     bd = sf.breakdown
     rows.append({
         "排名": sf.rank,
+        "航班号": f.segments[0].flight_no if f.segments else f.id,
         "航司": f.segments[0].airline if f.segments else "—",
         "票价 ($)": f.price_usd,
         "总时长": f"{h}h{m:02d}m",
@@ -332,6 +343,10 @@ for sf in all_scored:
 df = pd.DataFrame(rows)
 st.dataframe(df, use_container_width=True, hide_index=True, column_config={
     "排名": st.column_config.NumberColumn(width="small"),
+    "航班号": st.column_config.TextColumn(
+        help="虚拟航班号（航司 IATA 代码 + 序号，系统自动生成，非真实航班号）",
+        width="small",
+    ),
     "票价 ($)": st.column_config.NumberColumn(format="$%.0f"),
     "评分": st.column_config.ProgressColumn(format="%.1f", min_value=0, max_value=100),
     "建议": st.column_config.TextColumn(width="small"),

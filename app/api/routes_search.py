@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
-from app.db import save_session
+from app.db import save_session, historical_avg_price
 from app.schemas import SearchConfig, ScoredFlight
 from app.services.flight_fetcher import fetch_flights
 from app.services.recommender import recommend
@@ -55,7 +55,8 @@ def search_flights(
         price=w_price, duration=w_duration, stops=w_stops,
         transfer_risk=w_transfer_risk, time_comfort=w_time_comfort,
     )
-    scored = recommend(flights, top_n=len(flights), weights=weights)
+    hist_avg = historical_avg_price(config.origin, config.destination, config.depart_date)
+    scored = recommend(flights, top_n=len(flights), weights=weights, hist_avg_price=hist_avg)
 
     try:
         session_id = save_session(config, scored)

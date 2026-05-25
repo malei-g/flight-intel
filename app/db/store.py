@@ -153,6 +153,30 @@ def load_session_flights(session_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def historical_avg_price(
+    origin: str,
+    destination: str,
+    depart_date: str,
+) -> float | None:
+    """
+    返回该路线历史所有抓取中 Top-5 票价的全局均价，供 buy_or_wait 判断基线。
+    不足 2 次历史快照时返回 None（无参考意义）。
+    """
+    init_db()
+    with _conn() as con:
+        row = con.execute(
+            """SELECT AVG(f.price_usd) AS avg_price, COUNT(*) AS n
+               FROM fetch_sessions s
+               JOIN flight_snapshots f ON f.session_id = s.id
+               WHERE s.origin = ? AND s.destination = ? AND s.depart_date = ?
+                 AND f.rank <= 5""",
+            (origin, destination, depart_date),
+        ).fetchone()
+    if row and row["n"] >= 2:
+        return float(row["avg_price"])
+    return None
+
+
 def price_history(
     origin: str,
     destination: str,
