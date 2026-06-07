@@ -106,22 +106,54 @@ st.markdown("""
 
 
 # ── 搜索表单 ──────────────────────────────────────────────────────────────────
-c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 1, 1])
+c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 1, 1])
 with c1:
     origin_raw = st.text_input("出发地", value="PVG（上海浦东）")
 with c2:
     dest_raw = st.text_input("目的地", value="DTW（底特律）")
 with c3:
-    default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-    depart_date = st.text_input("出发日期", value=default_date)
+    depart_date = st.text_input(
+        "出发日期（出发地时间）",
+        value="",
+        placeholder="YYYY-MM-DD",
+        help="按出发机场所在时区的本地日期计算；留空时必须填写后才能查询",
+    )
 with c4:
-    top_n = st.selectbox("Top N", [3, 5, 10], index=1)
+    arrive_by_date = st.text_input(
+        "到达日期（到达地时间，含当日）",
+        value="2026-07-11",
+        placeholder="YYYY-MM-DD",
+        help="按到达机场所在时区的本地日期筛选：仅保留到达日期 ≤ 该日期的航班；留空不限",
+    )
 with c5:
+    top_n = st.selectbox("Top N", [3, 5, 10], index=1)
+with c6:
     st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
     fetch_btn = st.button("查询 Google Flights", use_container_width=True, type="primary")
 
 _iata_o = origin_raw.split("（")[0].strip().upper()[:3]
 _iata_d = dest_raw.split("（")[0].strip().upper()[:3]
+
+# 解析"到达日期"为 date；无效或为空则为 None
+from datetime import date as _date_cls
+_arrive_by: _date_cls | None = None
+_arr_txt = arrive_by_date.strip()
+if _arr_txt:
+    try:
+        _arrive_by = datetime.strptime(_arr_txt, "%Y-%m-%d").date()
+    except ValueError:
+        st.warning(f"⚠ 到达日期格式无效：{_arr_txt}，应为 YYYY-MM-DD。已忽略该筛选。")
+        _arrive_by = None
+
+# 出发日期必填校验
+_depart_txt = depart_date.strip()
+_depart_valid = False
+if _depart_txt:
+    try:
+        datetime.strptime(_depart_txt, "%Y-%m-%d")
+        _depart_valid = True
+    except ValueError:
+        st.warning(f"⚠ 出发日期格式无效：{_depart_txt}，应为 YYYY-MM-DD。")
 
 st.divider()
 
@@ -165,6 +197,40 @@ def _fetch_and_score(origin: str, dest: str, depart: str) -> list[ScoredFlight]:
         save_session(config, scored)
     except Exception:
         pass
+    return scored
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _fetch_and_score_multi(origin: str, dest: str, depart_dates: tuple[str, ...]) -> list[ScoredFlight]:
+    """抓取多个出发日并合并、按 (price, duration, stops, depart_hour) 去重后统一打分。"""
+    from app.schemas import SearchConfig
+    from app.services.flight_fetcher import fetch_flights
+    from app.db import save_session
+    all_flights: list[FlightOption] = []
+    seen: set[tuple[float, int, int, int, str]] = set()
+    last_cfg: SearchConfig | None = None
+    for d in depart_dates:
+        cfg = SearchConfig(origin=origin, destination=dest, depart_date=d)
+        last_cfg = cfg
+        try:
+            for fl in fetch_flights(cfg):
+                dep_hour = fl.segments[0].depart_time.hour if fl.segments else -1
+                dep_day = fl.segments[0].depart_time.date().isoformat() if fl.segments else d
+                key = (fl.price_usd, fl.total_duration_min, fl.stops, dep_hour, dep_day)
+                if key not in seen:
+                    seen.add(key)
+                    all_flights.append(fl)
+        except Exception:
+            continue
+    hist_avg = historical_avg_price(origin, dest, depart_dates[0])
+    if hist_avg is None:
+        hist_avg = fetch_adjacent_baseline(origin, dest, depart_dates[0])
+    scored = recommend(all_flights, top_n=len(all_flights), hist_avg_price=hist_avg)
+    if last_cfg is not None:
+        try:
+            save_session(last_cfg, scored)
+        except Exception:
+            pass
     return scored
 
 # ── 模式：历史记录 ────────────────────────────────────────────────────────────
@@ -242,10 +308,36 @@ else:
         st.stop()
 
     if fetch_btn:
-        with st.spinner(f"正在查询 Google Flights {_iata_o}→{_iata_d}…（约 5s）"):
+        # 校验：出发日期 与 到达日期 至少一个有效
+        if not _depart_valid and _arrive_by is None:
+            st.error("出发日期、到达日期至少填写一项（YYYY-MM-DD）。")
+            st.stop()
+
+        # 决定抓取的出发日列表
+        if _depart_valid:
+            depart_dates: tuple[str, ...] = (_depart_txt,)
+            query_label = _depart_txt
+        else:
+            # 仅给到达日：从到达日倒推。覆盖 to-1 / to / to-2（PVG→DTW 跨日常见）
+            ab = _arrive_by
+            depart_dates = (
+                (ab - timedelta(days=1)).isoformat(),
+                ab.isoformat(),
+                (ab - timedelta(days=2)).isoformat(),
+            )
+            query_label = f"to≤{ab.isoformat()}（倒推出发日 {depart_dates[0]}/{depart_dates[1]}/{depart_dates[2]}）"
+
+        spinner_msg = (
+            f"正在查询 Google Flights {_iata_o}→{_iata_d} "
+            f"({len(depart_dates)} 个出发日)…（约 {5 * len(depart_dates)}s）"
+        )
+        with st.spinner(spinner_msg):
             try:
-                st.session_state["last_scored"] = _fetch_and_score(_iata_o, _iata_d, depart_date)
-                st.session_state["last_query"] = (_iata_o, _iata_d, depart_date)
+                if len(depart_dates) == 1:
+                    st.session_state["last_scored"] = _fetch_and_score(_iata_o, _iata_d, depart_dates[0])
+                else:
+                    st.session_state["last_scored"] = _fetch_and_score_multi(_iata_o, _iata_d, depart_dates)
+                st.session_state["last_query"] = (_iata_o, _iata_d, query_label)
             except Exception as e:
                 st.error(f"查询失败: {e}")
                 st.stop()
@@ -255,6 +347,26 @@ else:
     raw_flights = [sf.flight for sf in all_scored]
     all_scored = recommend(raw_flights, top_n=len(raw_flights), weights=weights)
     top_scored = all_scored[:top_n]
+
+
+# ── 客户端筛选：到达日期 ≤ 截止日期（到达地本地日历日） ───────────────────────
+if _arrive_by is not None:
+    pre_n = len(all_scored)
+    def _within_cutoff(sf: ScoredFlight) -> bool:
+        if not sf.flight.segments:
+            return True
+        return sf.flight.segments[-1].arrive_time.date() <= _arrive_by
+    all_scored = [sf for sf in all_scored if _within_cutoff(sf)]
+    for i, sf in enumerate(all_scored, start=1):
+        sf.rank = i
+    top_scored = all_scored[:top_n]
+    st.caption(
+        f"🎯 已按「到达日期 ≤ {_arrive_by.isoformat()}（到达地时间）」筛选："
+        f"{pre_n} → {len(all_scored)} 条"
+    )
+    if not all_scored:
+        st.warning("当前筛选条件下没有匹配的航班，请放宽到达日期。")
+        st.stop()
 
 
 # ── KPI 行 ────────────────────────────────────────────────────────────────────
@@ -282,7 +394,8 @@ for sf in top_scored:
     bd = sf.breakdown.model_dump()
     h, m = divmod(f.total_duration_min, 60)
     stops_txt = "直飞" if f.stops == 0 else f"{f.stops} 次中转"
-    dep_time = f.segments[0].depart_time.strftime("%H:%M") if f.segments else "—"
+    dep_time = f.segments[0].depart_time.strftime("%m-%d %H:%M") if f.segments else "—"
+    arr_time = f.segments[-1].arrive_time.strftime("%m-%d %H:%M") if f.segments else "—"
 
     with st.container():
         left, mid, right = st.columns([1, 3, 2])
@@ -309,7 +422,9 @@ for sf in top_scored:
               <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:10px;">
                 <span class="mono" style="color:#22d3ee;font-size:22px;font-weight:600;">${f.price_usd:,.0f}</span>
                 <span style="color:#94a3b8;font-size:14px;margin-top:5px;">
-                  ⏱ {h}h {m:02d}m &nbsp;|&nbsp; {stops_txt} &nbsp;|&nbsp; 起飞 {dep_time}
+                  ⏱ {h}h {m:02d}m &nbsp;|&nbsp; {stops_txt} &nbsp;|&nbsp;
+                  起飞 {dep_time} <span style="font-size:11px;color:#64748b;">(出发地)</span>
+                  &nbsp;|&nbsp; 到达 {arr_time} <span style="font-size:11px;color:#64748b;">(到达地)</span>
                 </span>
               </div>
               <div style="font-size:13px;color:#94a3b8;line-height:1.6;">{sf.recommend_reason}</div>
@@ -336,7 +451,8 @@ for sf in all_scored:
         "票价 ($)": f.price_usd,
         "总时长": f"{h}h{m:02d}m",
         "中转": f.stops,
-        "起飞": f.segments[0].depart_time.strftime("%H:%M") if f.segments else "—",
+        "起飞(出发地)": f.segments[0].depart_time.strftime("%m-%d %H:%M") if f.segments else "—",
+        "到达(到达地)": f.segments[-1].arrive_time.strftime("%m-%d %H:%M") if f.segments else "—",
         "评分": sf.score,
         "建议": sf.buy_or_wait,
         "价格分": bd.price_score,
@@ -374,15 +490,15 @@ with ch2:
     st.markdown("##### 时长 vs 票价")
     sdf = df.copy()
     sdf["中转类型"] = sdf["中转"].map({0:"直飞",1:"1次中转",2:"2次中转"}).fillna("3次+")
-    sdf["时长(min)"] = [sf.flight.total_duration_min for sf in all_scored]
+    sdf["时长(h)"] = [round(sf.flight.total_duration_min / 60, 1) for sf in all_scored]
     fig_sc = px.scatter(
-        sdf, x="时长(min)", y="票价 ($)", size="评分", color="中转类型",
+        sdf, x="时长(h)", y="票价 ($)", size="评分", color="中转类型",
         hover_data=["航司","评分","建议"],
         color_discrete_map={"直飞":"#22d3ee","1次中转":"#3b82f6","2次中转":"#a78bfa","3次+":"#f87171"},
         size_max=24,
     )
     fig_sc.update_layout(**_CHART_LAYOUT,
-                         xaxis=dict(gridcolor="#334155", title="总时长（分钟）"),
+                         xaxis=dict(gridcolor="#334155", title="总时长（小时）"),
                          yaxis=dict(gridcolor="#334155", title="票价（USD）"),
                          legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#94a3b8")))
     st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
